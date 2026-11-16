@@ -1,37 +1,22 @@
-// Driver for markdown-render-speed-02.
-// Reads every case from /input/cases.json, renders each one with parse()
-// from ./parse.js, and writes the HTML strings (same order) as a JSON
-// array to <output-dir>/html.json. The output directory honours
-// MAKEFUN_OUTPUT_DIR when set, otherwise /output.
+// Entrypoint for the markdown-render-speed-02 bounty.
+// Reads every case from $MAKEFUN_INPUT_DIR/cases.json (default /input),
+// renders each markdown string with the dependency-free parser in
+// parse.js, and writes the HTML strings (same order) as a JSON array to
+// $MAKEFUN_OUTPUT_DIR/html.json (default /output).
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from './parse.js';
 
 type Case = { id: string; markdown: string };
 
-function resolveInputDir(): string {
-  const env = process.env.MAKEFUN_INPUT_DIR;
-  if (env !== undefined && env.length > 0) return env;
-  return '/input';
-}
+const inputDir = process.env.MAKEFUN_INPUT_DIR ?? '/input';
+const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-function resolveOutputDir(): string {
-  const env = process.env.MAKEFUN_OUTPUT_DIR;
-  if (env !== undefined && env.length > 0) return env;
-  return '/output';
+const raw: unknown = JSON.parse(readFileSync(join(inputDir, 'cases.json'), 'utf8'));
+const cases: Case[] = Array.isArray(raw) ? raw : (raw as { cases: Case[] }).cases;
+const html: string[] = new Array(cases.length);
+for (let i = 0; i < cases.length; i++) {
+  html[i] = parse(cases[i].markdown);
 }
-
-function main(): void {
-  const cases = JSON.parse(
-    readFileSync(join(resolveInputDir(), 'cases.json'), 'utf8'),
-  ) as Case[];
-  const out: string[] = new Array(cases.length);
-  for (let i = 0; i < cases.length; i++) {
-    out[i] = parse(cases[i].markdown);
-  }
-  const outDir = resolveOutputDir();
-  mkdirSync(outDir, { recursive: true });
-  writeFileSync(join(outDir, 'html.json'), JSON.stringify(out));
-}
-
-main();
+mkdirSync(outputDir, { recursive: true });
+writeFileSync(join(outputDir, 'html.json'), JSON.stringify(html));

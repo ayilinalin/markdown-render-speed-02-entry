@@ -231,8 +231,10 @@ function stripIndent(line, cols) {
 }
 
 // Remove up to `cols` columns of indentation from the start of a line. A
-// tab straddling the boundary becomes spaces; anything past the strip is
-// left verbatim (tabs included). Used for fenced code content.
+// tab straddling the boundary is dropped entirely (marked does not expand
+// the remainder to spaces: a content line starting with a tab under a
+// fence opener indented 1-3 loses the whole tab). Anything past the strip
+// is left verbatim (tabs included). Used for fenced code content.
 function stripCols(line, cols) {
   let col = 0;
   let i = 0;
@@ -242,7 +244,7 @@ function stripCols(line, cols) {
     if (c === 32) { col++; i++; }
     else if (c === 9) {
       const w = 4 - (col % 4);
-      if (col + w > cols) return ' '.repeat(col + w - cols) + line.slice(i + 1);
+      if (col + w > cols) return line.slice(i + 1);
       col += w; i++;
     } else break;
   }
@@ -526,6 +528,27 @@ function findCodeClose(src, from, len) {
   let i = from;
   while (i < n) {
     if (src.charCodeAt(i) === 96) {
+      let j = i;
+      while (j < n && src.charCodeAt(j) === 96) j++;
+      if (j - i === len) return j;
+      i = j;
+    } else i++;
+  }
+  return -1;
+}
+
+// Like findCodeClose, but the search stops at the first unescaped `|` (a
+// table cell boundary): a code span in a table row cannot cross it. An
+// escaped pipe `\|` is skipped (it is not a boundary). -1 when no closer
+// appears before the boundary.
+function findCodeCloseInCell(src, from, len) {
+  const n = src.length;
+  let i = from;
+  while (i < n) {
+    const c = src.charCodeAt(i);
+    if (c === 92 && i + 1 < n && src.charCodeAt(i + 1) === 124) { i += 2; continue; }
+    if (c === 124) return -1;
+    if (c === 96) {
       let j = i;
       while (j < n && src.charCodeAt(j) === 96) j++;
       if (j - i === len) return j;
@@ -1185,6 +1208,19 @@ function partsToString(parts) {
   return out;
 }
 
+// Is there a later delimiter in parts (after `closer`) that could close
+// `opener` on its own (same char, can close, length >= opener's length)?
+// Used by R1b so a shorter closer does not steal a longer opener that has
+// its own longer closer coming up.
+function hasLaterCloser(parts, closer, opener) {
+  const ci = parts.indexOf(closer);
+  for (let j = ci + 1; j < parts.length; j++) {
+    const p = parts[j];
+    if (typeof p === 'object' && p.t === 'd' && p.ch === opener.ch && p.close && p.n >= opener.n) return true;
+  }
+  return false;
+}
+
 // CommonMark Appendix A emphasis resolution over the parts array.
 function resolveEmphasis(parts) {
   const openers = [];
@@ -1204,6 +1240,13 @@ function resolveEmphasis(parts) {
           if (closer.ch === '~') {
             // strikethrough: opener and closer must have equal length (1 or 2)
             if (o.n !== closer.n) continue;
+          } else if (closer.n < o.n && hasLaterCloser(parts, closer, o)) {
+            // R1b: a shorter closer must not steal from a longer opener
+            // when a later closer of at least the opener's length exists
+            // (e.g. in `**a *b*c* d**` the lone `*` stays literal and the
+            // `**` opener pairs with its own `**` closer; but in `**foo*`
+            // with no later `**` closer, the lone `*` may pair with it).
+            continue;
           } else if ((o.open && o.close) || (closer.open && closer.close)) {
             // odd-match rule: when either delimiter can both open and close,
             // the sum of the runs must not be a multiple of 3 unless both are
@@ -1233,6 +1276,18 @@ function resolveEmphasis(parts) {
         // drop openers that are now inside the wrapper node
         for (let s = openers.length - 1; s >= 0; s--) {
           if (!parts.includes(openers[s])) openers.splice(s, 1);
+        }
+        if (k === 2 && closer.ch !== '~' && closer.open && closer.close && opener.open && !opener.close && closer.n === 0) {
+          // R2: a closer that can both open and close, matching an opener
+          // that can only open to form a STRONG and fully consumed, blocks
+          // the nearest enclosing single delimiter opener of the SAME
+          // character (`*`/`_` of length 1) from forming emphasis later
+          // (e.g. `*a **b**c*` stays literal outside the strong, while
+          // `*a**b**c*`, `*a **b** c*`, `*a *b*c*`, `_a **b**c_`,
+          // `*a __b__c*` and `*a **b***` still form the outer emphasis).
+          for (let s = openers.length - 1; s >= 0; s--) {
+            if (openers[s] !== opener && openers[s].ch === closer.ch && openers[s].n === 1) { openers.splice(s, 1); break; }
+          }
         }
         if (closer.n === 0) break;
         // continue the while loop to try another opener with this closer
@@ -1460,7 +1515,12 @@ function splitTableRow(line) {
       let j = i;
       while (j < n && trimmed.charCodeAt(j) === 96) j++;
       const len = j - i;
-      const close = findCodeClose(trimmed, j, len);
+      // A code span may not cross a cell boundary: the closer must appear
+      // before the next unescaped `|`. If it does not, the backticks are
+      // literal and the `|` splits the cell (e.g. `` ``add` | `a | b` ``:
+      // the `` `` `` opener has no 2-backtick closer in its cell, and the
+      // single backtick after `add` must not pair with the one before `a`).
+      const close = findCodeCloseInCell(trimmed, j, len);
       if (close === -1) { cur += trimmed.slice(i, j); i = j; continue; }
       // an escaped pipe inside a code span is still an escaped pipe:
       // the table resolves \| to | before the cell is parsed inline
@@ -1740,8 +1800,13 @@ function parseBlocks(lines, lo, hi, refs, endsNL, trailingSpaceContinues, looseO
       let htmlText = htmlLines.join('\n');
       // the block keeps the newline after its last line, unless the next
       // line is exactly empty (a whitespace-only line still leaves it) or
-      // it ran to the end of a container whose text has no trailing newline
-      if (i < hi ? lines[i].length > 0 : endsNL) htmlText += '\n';
+      // it ran to the end of a container whose text has no trailing newline.
+      // Exception: types 5/6 end AT a blank line, so the newline after the
+      // last content line is not part of the block's output — a
+      // whitespace-only terminator must not leave a trailing newline either
+      // (e.g. a lone `</details>` line followed by a spaces-only line).
+      const blankTerminated = hb.type === 5 || hb.type === 6;
+      if (i < hi ? (blankTerminated ? false : lines[i].length > 0) : endsNL) htmlText += '\n';
       emit({ t: 'html', text: htmlText });
       continue;
     }
@@ -1945,16 +2010,19 @@ function parseBlockquote(lines, i, hi, refs, inListItem) {
 }
 
 // If `lines` end inside an unclosed fenced code block, return the fence
-// {ch, len, nested}; otherwise null. Used by list collection: a fence's
-// content lines belong to the item regardless of their indentation — except
-// a fence that sits directly in an ORDERED list item, where a line below
-// the content indent ends the item instead. `nested` is true when the fence
-// opener sits inside a nested list item (a marker line earlier in the item
-// whose content indent the opener meets); a nested fence keeps its content
-// lines even in an ordered list.
+// {ch, len, nested, contentLines}; otherwise null. Used by list collection:
+// a fence's content lines belong to the item regardless of their
+// indentation — except a fence that sits directly in an ORDERED list item,
+// where a line below the content indent ends the item instead. `nested` is
+// true when the fence opener sits inside a nested list item (a marker line
+// earlier in the item whose content indent the opener meets); a nested fence
+// keeps its content lines even in an ordered list. `contentLines` counts the
+// lines after the opener: a dedented line ends the item when the fence
+// holds no content yet, but stays fence content once it does.
 function openFence(lines) {
   let fence = null;
   let nestIndent = null;
+  let openerIdx = -1;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const [col, idx] = indentOf(line);
@@ -1965,7 +2033,7 @@ function openFence(lines) {
       if (it) { nestIndent = it.contentIndent; continue; }
       if (nestIndent !== null && col < nestIndent) nestIndent = null;
       const f = matchFence(line, idx);
-      if (f) fence = { ch: f.ch, len: f.len, nested: nestIndent !== null && col >= nestIndent, openerCol: col };
+      if (f) { fence = { ch: f.ch, len: f.len, nested: nestIndent !== null && col >= nestIndent, openerCol: col }; openerIdx = i; }
     } else {
       const fc = line.charCodeAt(idx);
       if (fc === fence.ch) {
@@ -1977,11 +2045,12 @@ function openFence(lines) {
             if (line.charCodeAt(p) !== 32 && line.charCodeAt(p) !== 9) { ok = false; break; }
             p++;
           }
-          if (ok) fence = null;
+          if (ok) { fence = null; openerIdx = -1; }
         }
       }
     }
   }
+  if (fence) fence.contentLines = openerIdx >= 0 ? lines.length - 1 - openerIdx : 0;
   return fence;
 }
 
@@ -2057,9 +2126,16 @@ function parseList(lines, i, hi, refs, emit, inListItem) {
       if (it2 && it2.ordered === ordered && it2.bullet === bullet) break;
       // a list item of a different kind ends this list (a new list starts)
       if (it2) break;
-      // fence content: a line inside an unclosed fenced code block belongs
-      // to the item regardless of indentation (fence content is literal)
-      if (openFence(item.lines)) {
+      // Fence content: a line inside an unclosed fenced code block belongs
+      // to the item regardless of indentation — but ONLY once the fence
+      // already holds content. A dedented line right after the opener (zero
+      // content lines) ends the item instead: the fence closes empty and
+      // the line starts a new block at the parent level (it may itself open
+      // a new fence there). With content already in the fence, dedented
+      // lines stay fence content until the closing fence.
+      // (fence content is literal)
+      const of = openFence(item.lines);
+      if (of && of.contentLines >= 1) {
         const s = col2 >= it.contentIndent ? stripIndent(l2, it.contentIndent) : l2;
         item.lines.push(s);
         j++;
