@@ -1891,13 +1891,17 @@ function bracketFormsLink(text, pos, refs) {
         if (cj - oi < 2) continue; // empty content
         const contentNodes = parr.slice(oi + 1, cj);
         // an emphasis pair cannot span a code span whose content holds
-        // a backtick (multi-backtick span `` a ` b ``): marked leaves
-        // the '_' literal (doc-20). A single-backtick span's content
-        // never holds a backtick, so this only fires for multi-backtick
-        // spans.
-        let badCode = false;
-        for (const cn2 of contentNodes) { if (cn2.t === 'code' && cn2.s.includes('`')) { badCode = true; break; } }
-        if (badCode) continue;
+        // a backtick (multi-backtick span `` a ` b ``) — BUT only when
+        // the pair sits inside link text (an active '[' opener): the
+        // link fails to form there and the delimiters stay literal
+        // (doc-20 '[but _previous..._](url)'). Standalone, the same
+        // span does NOT block emphasis (doc-01 '~~...~~' -> <del>,
+        // doc-09 '__...__' -> <strong>, doc-20 '_may..._' -> <em>).
+        if (insideLinkText()) {
+          let badCode = false;
+          for (const cn2 of contentNodes) { if (cn2.t === 'code' && cn2.s.includes('`')) { badCode = true; break; } }
+          if (badCode) continue;
+        }
         // '~' always renders <del> (single or double); '*'/'_' use strong/em
         const emNode = { t: closer.ch === '~' ? 'del' : (use === 2 ? 'strong' : 'em'), children: contentNodes };
         on.s = on.s.slice(0, on.s.length - use);
@@ -2338,8 +2342,11 @@ function matchEmailAutolink(text, i) {
   // is one identifier; gfm-632/633: 'a.b-c_d@a.b_' at end of input is
   // NOT an autolink). A '_' followed by whitespace or punctuation is a
   // separate delimiter — e.g. the closing '_' of emphasis (doc-34/37/38:
-  // an@relay.example.com_  cache) — and the email still forms.
-  if (k < n && text[k] === '_' && (k + 1 >= n || /[A-Za-z0-9_]/.test(text[k + 1]))) return null;
+  // an@relay.example.com_  cache) — and the email still forms. A '__'
+  // after the email is a strong delimiter, not an identifier (doc-04:
+  // because@mark.example.com__ closes the strong), so it never
+  // invalidates.
+  if (k < n && text[k] === '_' && text[k + 1] !== '_' && (k + 1 >= n || /[A-Za-z0-9_]/.test(text[k + 1]))) return null;
   return { email: text.slice(i, k), end: k };
 }
 
