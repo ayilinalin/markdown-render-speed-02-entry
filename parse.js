@@ -1119,7 +1119,10 @@ function parseBlocks(lines, refs) {
         i++; continue;
       }
       if (leaf.kind === 'table') {
-        if (isBlank) { finishLeaf(); continue; }
+        // a whitespace-only line ends the table — UNLESS it holds a tab,
+        // which is a table row (an empty row; doc-26: a lone '\t' line
+        // between rows becomes an empty <tr>, not the table end)
+        if (isBlank && !raw.includes('\t')) { finishLeaf(); continue; }
         if (lazy) { finishLeaf(); closeFrom(f); continue; }
         // a line starting a new block (blockquote, heading, list, fence,
         // thematic break, html block) ends the table; reprocess it normally
@@ -2219,19 +2222,25 @@ function scanAutolinkPath(text, urlStart, start) {
     }
     if (depth > 0) end = parenPos[parenPos.length - depth];
   }
-  // trim trailing punctuation
-  while (end > start && /[?!.,:;*_~'"]/.test(text[end - 1])) end--;
-  // trim trailing unbalanced closers
-  while (end > start) {
-    const c = text[end - 1];
-    if (c === ')' || c === ']' || c === '}') {
-      const open = c === ')' ? '(' : c === ']' ? '[' : '{';
-      const seg = text.slice(urlStart, end);
-      let oc = 0, cc = 0;
-      for (const ch of seg) { if (ch === open) oc++; if (ch === c) cc++; }
-      if (cc > oc) { end--; continue; }
+  // trim trailing punctuation and unbalanced closers, looping until
+  // stable: a trailing ')' shields dots from the punctuation trim, so
+  // the two must alternate (doc-23: 'lumen....)' -> 'lumen'; doc-10:
+  // 'nova).' -> 'nova')
+  let changed = true;
+  while (changed) {
+    changed = false;
+    while (end > start && /[?!.,:;*_~'"]/.test(text[end - 1])) { end--; changed = true; }
+    while (end > start) {
+      const c = text[end - 1];
+      if (c === ')' || c === ']' || c === '}') {
+        const open = c === ')' ? '(' : c === ']' ? '[' : '{';
+        const seg = text.slice(urlStart, end);
+        let oc = 0, cc = 0;
+        for (const ch of seg) { if (ch === open) oc++; if (ch === c) cc++; }
+        if (cc > oc) { end--; changed = true; continue; }
+      }
+      break;
     }
-    break;
   }
   return end;
 }
@@ -2309,8 +2318,13 @@ function matchEmailAutolink(text, i) {
   lastLabel = tail;
   if (labels < 2) return null;
   if (!/^[A-Za-z]+$/.test(lastLabel)) return null;
-  // a trailing '_' extends the domain and invalidates the match entirely
-  if (k < n && text[k] === '_') return null;
+  // a trailing '_' invalidates the match entirely when it is at the
+  // end of the text or followed by a word character (user@domain.com_foo
+  // is one identifier; gfm-632/633: 'a.b-c_d@a.b_' at end of input is
+  // NOT an autolink). A '_' followed by whitespace or punctuation is a
+  // separate delimiter — e.g. the closing '_' of emphasis (doc-34/37/38:
+  // an@relay.example.com_  cache) — and the email still forms.
+  if (k < n && text[k] === '_' && (k + 1 >= n || /[A-Za-z0-9_]/.test(text[k + 1]))) return null;
   return { email: text.slice(i, k), end: k };
 }
 
