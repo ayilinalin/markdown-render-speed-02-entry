@@ -1122,8 +1122,10 @@ function parseBlocks(lines, refs) {
         leaf.lines.push(rest);
         if (leaf.htype <= 5 && htmlBlockEnds(rest, leaf.htype)) {
           // the end-marker is on this line: a newline follows iff the next
-          // source line is non-blank
-          finishLeaf(i + 1 < lines.length && lines[i + 1].trim() !== '');
+          // source line is non-blank. A tab-only line counts as non-blank
+          // (doc-15: '-->' then a lone '\t' then a paragraph still gets
+          // the '\n'); an empty or spaces-only line is blank.
+          finishLeaf(i + 1 < lines.length && lines[i + 1] !== '' && !/^[ ]+$/.test(lines[i + 1]));
         }
         i++; continue;
       }
@@ -1313,7 +1315,9 @@ function parseBlocks(lines, refs) {
         const node = addBlock({ t: 'html', text: '', htype: ht });
         leaf = { kind: 'html', node, htype: ht, lines: [rawRest] };
         if (ht <= 5 && htmlBlockEnds(rawRest, ht)) {
-          finishLeaf(i + 1 < lines.length && lines[i + 1].trim() !== '');
+          // a tab-only next line counts as non-blank (doc-15); an empty
+          // or spaces-only next line is blank
+          finishLeaf(i + 1 < lines.length && lines[i + 1] !== '' && !/^[ ]+$/.test(lines[i + 1]));
         }
         blankPending = false;
         i++; continue;
