@@ -9,6 +9,12 @@ import { parse } from './parse.js';
 
 type Case = { id: string; markdown: string };
 
+function resolveInputDir(): string {
+  const env = process.env.MAKEFUN_INPUT_DIR;
+  if (env !== undefined && env.length > 0) return env;
+  return '/input';
+}
+
 function resolveOutputDir(): string {
   const env = process.env.MAKEFUN_OUTPUT_DIR;
   if (env !== undefined && env.length > 0) return env;
@@ -17,7 +23,7 @@ function resolveOutputDir(): string {
 
 function main(): void {
   const cases = JSON.parse(
-    readFileSync('/input/cases.json', 'utf8'),
+    readFileSync(join(resolveInputDir(), 'cases.json'), 'utf8'),
   ) as Case[];
   const out: string[] = new Array(cases.length);
   for (let i = 0; i < cases.length; i++) {
