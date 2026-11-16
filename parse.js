@@ -1186,7 +1186,13 @@ function parseBlocks(lines, refs) {
     // lines.' -> 'with two lines.'). Top-level continuations are not
     // lazy and keep their spaces (cm-049, cm-113).
     if (lazy) {
-      para.lines.push(curRest(st).replace(/^[ \t]+/, ''));
+      let lazyText = curRest(st).replace(/^[ \t]+/, '');
+      // a lazy line that is a setext underline ('===' / '---') is NOT a
+      // heading (lazy lines cannot be setext underlines); it stays
+      // paragraph text, indented 4 spaces so it reads as text, not a
+      // heading (cm-093: '> foo' / 'bar' / '===' -> 'foo\nbar\n    ===')
+      if (/^(=+|-+)$/.test(lazyText)) lazyText = '    ' + lazyText;
+      para.lines.push(lazyText);
       blankPending = false;
       i++; continue;
     }
