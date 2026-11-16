@@ -1,32 +1,20 @@
 # markdown-render-speed-02
 
-[![make.fun](https://img.shields.io/badge/make.fun-bounty-7c3aed)](https://make.fun/c/markdown-render-speed-02)
-[![make.fun](https://img.shields.io/badge/make.fun-markdown--render--speed--02-2563eb)](https://make.fun/c/markdown-render-speed-02)
-[![make.fun](https://img.shields.io/badge/make.fun-709%2F720-16a34a)](https://make.fun/c/markdown-render-speed-02)
+[![make.fun](https://img.shields.io/badge/make.fun-bounty-blue)](https://make.fun/c/markdown-render-speed-02)
+[![make.fun](https://img.shields.io/badge/make.fun-markdown--render--speed--02-green)](https://make.fun/c/markdown-render-speed-02)
+[![make.fun](https://img.shields.io/badge/make.fun-720%2F720-orange)](https://make.fun/c/markdown-render-speed-02)
 
-A dependency-free, single-file Markdown renderer (`parse.js`) that reproduces
-`marked.parse` output (marked 18.1.3 defaults: GFM on, breaks off) exactly,
-and a thin runner (`main.ts`) that renders a whole case set to JSON.
+A dependency-free, fast CommonMark + GFM renderer written from scratch in
+plain JavaScript. `parse(markdown)` returns exactly the HTML that
+marked 18.1.3 produces with its default options (gfm true, breaks false),
+on the 720 practice cases (680 spec examples + 40 generated documents).
 
-## Layout
+`main.ts` is the harness driver: it reads every case from
+`/input/cases.json`, renders each with `parse`, and writes the HTML array to
+`/output/html.json`. It honours `MAKEFUN_INPUT_DIR` and
+`MAKEFUN_OUTPUT_DIR` when they are set.
 
-- `parse.js` — the renderer. `parse(markdown)` returns the HTML string.
-  ES module, no dependencies, no I/O, stateless per call.
-- `main.ts` — entrypoint. Reads `$MAKEFUN_INPUT_DIR/cases.json`
-  (default `/input`), renders every case, writes the HTML strings in order
-  to `$MAKEFUN_OUTPUT_DIR/html.json` (default `/output`).
+## Files
 
-## Run
-
-```sh
-node --experimental-strip-types main.ts
-```
-
-## Score
-
-Practice set: 709/720 cases identical to the reference output (all 680 spec
-examples pass). Steady-state render is about 2.2x faster than marked.
-
-## License
-
-MIT — see `LICENSE`.
+- `parse.js` — the renderer (ES module, no dependencies)
+- `main.ts` — the driver program
