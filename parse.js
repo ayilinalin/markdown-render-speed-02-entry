@@ -929,7 +929,12 @@ function parseBlocks(lines, refs) {
       while (ls.length > 0 && ls[ls.length - 1] === '') ls.pop();
       leaf.node.text = ls.join('\n') + (ls.length ? '\n' : '');
     } else if (leaf.kind === 'fence') {
-      leaf.node.text = leaf.lines.join('\n') + (leaf.lines.length ? '\n' : '');
+      // drop exactly ONE trailing blank line (the blank line just before
+      // the closing fence is not content; cm-318: 'b' + 2 blanks -> 'b'
+      // + 1 blank kept; doc-03/31/36: a single trailing blank is dropped)
+      const ls = leaf.lines;
+      if (ls.length > 0 && ls[ls.length - 1] === '') ls.pop();
+      leaf.node.text = ls.join('\n') + (ls.length ? '\n' : '');
     } else if (leaf.kind === 'html') {
       // HTML block text is the raw lines joined by '\n' (no trailing newline;
       // the renderer appends one only when the block is directly followed
@@ -1149,6 +1154,15 @@ function parseBlocks(lines, refs) {
         blankPending = true;
         // end open blockquotes (pop quote frames; lists/items stay)
         while (stack.length > 1 && stack[stack.length - 1].kind === 'quote') stack.pop();
+      } else if (restAfterMarkers === '') {
+        // a lone '>' (nothing after the marker) is also a blank line,
+        // but it only makes a list loose when it falls directly inside
+        // a list item (innermost frame is an item). Inside a blockquote
+        // it does not (cm-320: '> b' / '>' inside an item's quote
+        // leaves the list tight); doc-09's '>' between an item's
+        // paragraph and its nested list DOES loosen the list.
+        const top = stack[stack.length - 1];
+        if (top && top.kind === 'item') blankPending = true;
       }
       i++; continue;
     }
@@ -1321,14 +1335,17 @@ function parseBlocks(lines, refs) {
         // can a list interrupt a paragraph? Only a NEW list is restricted:
         // an empty item may not interrupt, and an ordered list may only
         // interrupt when it starts at 1 (cm-304: 14. does not interrupt).
-        // (A list that is NOT interrupting a paragraph may start at any
-        // number — doc-02 49., doc-05 979121), doc-27 0.)
+        // BUT the start-at-1 rule only applies at the top level: inside
+        // a container (blockquote/list — stack deeper than just the doc)
+        // any start number interrupts (doc-01 505791., doc-02 49.,
+        // doc-27 0.). A list NOT interrupting a paragraph may start at
+        // any number anywhere.
         let canInterrupt = true;
         if (para && !listNode) {
           const afterMarker = content.slice(m.markerLen);
           const emptyItem = /^[ \t]*$/.test(afterMarker);
           if (emptyItem) canInterrupt = false;
-          if (m.ordered && m.num !== 1) canInterrupt = false;
+          if (m.ordered && m.num !== 1 && stack.length <= 1) canInterrupt = false;
         }
         if (canInterrupt) {
           closePara();
@@ -1605,10 +1622,13 @@ function parseLinkLabel(text, i) {
 const EMAIL_AUTOLINK_RE = /^[a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
 const SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]{1,31}:/;
 
-// does this node tree contain a link node (links may not contain links)?
+// does this node tree contain an EXPLICIT link node (links may not
+// contain links)? Autolinks do NOT count: marked nests an autolink
+// inside an explicit link's text (doc-08/17/22), so a link whose text
+// holds an autolink still forms.
 function containsLink(nodes) {
   for (const nd of nodes) {
-    if (nd.t === 'link') return true;
+    if (nd.t === 'link' && !nd.auto) return true;
     if (nd.children && containsLink(nd.children)) return true;
   }
   return false;
@@ -1704,6 +1724,31 @@ function matchHtmlTag(text, i) {
 function tryFormLink(text, i, opener, refs) {
   const n = text.length;
   const rawText = text.slice(opener.bracketPos + 1, i);
+  // a multi-backtick code span whose content holds a backtick breaks
+  // the link, UNLESS the span sits immediately before ']' (doc-20:
+  // `` a ` b `` followed by '_' then ']' -> no link; the url becomes
+  // an autolink instead)
+  {
+    let p = 0;
+    while (p < rawText.length) {
+      if (rawText[p] !== '`') { p++; continue; }
+      let q = p;
+      while (q < rawText.length && rawText[q] === '`') q++;
+      const run = q - p;
+      let m = q, closed = -1;
+      while (m < rawText.length) {
+        if (rawText[m] === '`') {
+          let r = m;
+          while (r < rawText.length && rawText[r] === '`') r++;
+          if (r - m === run) { closed = r; break; }
+          m = r;
+        } else m++;
+      }
+      if (closed === -1) break;
+      if (run >= 2 && rawText.slice(q, closed - run).includes('`') && closed !== rawText.length) return null;
+      p = closed;
+    }
+  }
   if (i + 1 < n && text[i + 1] === '(') {
     const il = parseInlineLink(text, i + 1);
     if (il) return { href: il.href, title: il.title, end: il.end };
@@ -1827,6 +1872,14 @@ function bracketFormsLink(text, pos, refs) {
         const oi = parr.indexOf(on), cj = parr.indexOf(cn);
         if (cj - oi < 2) continue; // empty content
         const contentNodes = parr.slice(oi + 1, cj);
+        // an emphasis pair cannot span a code span whose content holds
+        // a backtick (multi-backtick span `` a ` b ``): marked leaves
+        // the '_' literal (doc-20). A single-backtick span's content
+        // never holds a backtick, so this only fires for multi-backtick
+        // spans.
+        let badCode = false;
+        for (const cn2 of contentNodes) { if (cn2.t === 'code' && cn2.s.includes('`')) { badCode = true; break; } }
+        if (badCode) continue;
         // '~' always renders <del> (single or double); '*'/'_' use strong/em
         const emNode = { t: closer.ch === '~' ? 'del' : (use === 2 ? 'strong' : 'em'), children: contentNodes };
         on.s = on.s.slice(0, on.s.length - use);
@@ -1903,7 +1956,19 @@ function bracketFormsLink(text, pos, refs) {
       let k = i - 1;
       while (k >= textStart && text[k] === ' ') { spaces++; k--; }
       if (k < textStart) {
-        // the unflushed run is all spaces; extend into the last text node
+        // the unflushed run (textStart..i) is all spaces. If there are
+        // 2+, it is a hard break even when the previous node is a link /
+        // emphasis (not a text node) — the spaces are entirely in this
+        // run, so there is nothing to trim from a text node.
+        if (spaces >= 2) {
+          textStart = i;
+          pushNode({ t: 'br' });
+          i++;
+          while (i < n && (text[i] === ' ' || text[i] === '\t')) i++;
+          textStart = i;
+          continue;
+        }
+        // fewer than 2 spaces in this run; maybe the last text node has more
         if (out.length > 0 && out[out.length - 1].t === 'text') {
           const last = out[out.length - 1];
           const s = last.s;
@@ -1957,14 +2022,14 @@ function bracketFormsLink(text, pos, refs) {
           if (SCHEME_RE.test(inner)) {
             flushText(i);
             const uri = inner;
-            const linkNode = pushNode({ t: 'link', href: uri, title: '', children: [{ t: 'text', s: uri }] });
+            const linkNode = pushNode({ t: 'link', href: uri, title: '', auto: true, children: [{ t: 'text', s: uri }] });
             linkNode.children[0]._p = linkNode.children;
             i = gt + 1; textStart = i;
             continue;
           }
           if (EMAIL_AUTOLINK_RE.test(inner)) {
             flushText(i);
-            const linkNode = pushNode({ t: 'link', href: 'mailto:' + inner, title: '', children: [{ t: 'text', s: inner }] });
+            const linkNode = pushNode({ t: 'link', href: 'mailto:' + inner, title: '', auto: true, children: [{ t: 'text', s: inner }] });
             linkNode.children[0]._p = linkNode.children;
             i = gt + 1; textStart = i;
             continue;
@@ -2086,7 +2151,7 @@ function bracketFormsLink(text, pos, refs) {
           const m = matchWwwAutolink(text, i);
           if (m) {
             flushText(i);
-            const linkNode = pushNode({ t: 'link', href: 'http://' + m.url, title: '', children: [{ t: 'text', s: m.url }] });
+            const linkNode = pushNode({ t: 'link', href: 'http://' + m.url, title: '', auto: true, children: [{ t: 'text', s: m.url }] });
             linkNode.children[0]._p = linkNode.children;
             i = m.end; textStart = i;
             continue;
@@ -2097,7 +2162,7 @@ function bracketFormsLink(text, pos, refs) {
         const m = matchEmailAutolink(text, i);
         if (m) {
           flushText(i);
-          const linkNode = pushNode({ t: 'link', href: 'mailto:' + m.email, title: '', children: [{ t: 'text', s: m.email }] });
+          const linkNode = pushNode({ t: 'link', href: 'mailto:' + m.email, title: '', auto: true, children: [{ t: 'text', s: m.email }] });
           linkNode.children[0]._p = linkNode.children;
           i = m.end; textStart = i;
           continue;
@@ -2108,7 +2173,7 @@ function bracketFormsLink(text, pos, refs) {
         const m = matchSchemeAutolink(text, i);
         if (m) {
           flushText(i);
-          const linkNode = pushNode({ t: 'link', href: m.url, title: '', children: [{ t: 'text', s: m.url }] });
+          const linkNode = pushNode({ t: 'link', href: m.url, title: '', auto: true, children: [{ t: 'text', s: m.url }] });
           linkNode.children[0]._p = linkNode.children;
           i = m.end; textStart = i;
           continue;
