@@ -8,7 +8,16 @@ export function parse(src) {
   const lines = splitLines(src);
   const refs = new Map();
   const doc = parseBlocks(lines, refs);
-  return renderDoc(doc, refs);
+  let out = renderDoc(doc, refs);
+  // a raw HTML block (type 6/7) ending the document keeps no trailing
+  // newline when the source itself has none (gfm-657: the <blockquote>
+  // HTML block ends the document with no '\n'); other last blocks and
+  // sources ending in '\n' still get the trailing newline
+  if (!src.endsWith('\n') && out.endsWith('\n') && doc.children.length > 0) {
+    const last = doc.children[doc.children.length - 1];
+    if (last.t === 'html' && last.htype !== undefined && last.htype > 5) out = out.slice(0, -1);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- utilities
